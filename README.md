@@ -4,9 +4,10 @@ Helps find long Tokio poll times. Tokio tasks that have long poll times can dela
 high tail latencies to other tasks running on the same executor, so it's useful to have a tool catching them.
 
 To use this, you need to attach async-profiler to your program. For it to work, you can't load it with LD_PRELOAD
-but must use the API calls and add a call to the `asprof_set_helper` (added in my branch) that enables the timestamp
-tracing. The information is currently published only in JFR mode, and you can use the decoder provided in this
-package to find the polls exceeding some threshold.
+but must use the async-profiler API calls (`asprof_init` and `asprof_execute`) and add a call to the `asprof_set_helper`
+(added in my branch) that enables the timestamp tracing. The information is currently published only in JFR mode
+(to a JFR file you can read offline), and you can use the decoder provided in this package to find the polls
+exceeding some threshold.
 
 To use, you currently need this branch of async-profiler:
 
