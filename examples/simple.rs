@@ -73,9 +73,9 @@ pub async fn main() -> Result<(), anyhow::Error> {
 
     let mut ts = vec![];
 
-    for _ in 0..192 {
+    for _ in 0..16 {
         ts.push(tokio::task::spawn(pollcatch::PollTimingFuture::new(async move {
-            for i in 0..1_000_000_000u64 {
+            for i in 0..20_000u64 { // 100 us * 20_000 = 2s
                 tokio::task::yield_now().await;
                 if i % 1000 == 0 {
                     as_();
