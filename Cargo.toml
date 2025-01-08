@@ -11,3 +11,15 @@ readme = "README.md"
 keywords = ["timing"]
 
 [dependencies]
+pin-project-lite = "0.2"
+libc = "0.2"
+tower-layer = "0.3"
+tower-service = "0.3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+libloading = "0.8"
+anyhow = "1"
+
+[[example]]
+name = "simple"
