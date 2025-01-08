@@ -1,0 +1,13 @@
+[package]
+name = "pollcatch"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "finds long Tokio polls"
+homepage = "https://github.com/arielb1/pollcatch"
+repository = "https://github.com/arielb1/pollcatch"
+documentation = "https://docs.rs/pollcatch"
+readme = "README.md"
+keywords = ["timing"]
+
+[dependencies]
