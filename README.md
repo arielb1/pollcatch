@@ -30,6 +30,8 @@ cargo run --example simple
 
 ## Example output
 
+As you can see, there is an `accidentally_slow` function that calls `sleep_ms` :-(.
+
 ```
 [2148483.851781] poll of 22992us
  -   1: libpthread-2.26.so.__nanosleep
@@ -95,3 +97,4 @@ cargo run --example simple
  -   5: simple.simple::main::{{closure}}::{{closure}}
  -  56 more frame(s) (pass --stack-depth=61 to show)
 ```
+
