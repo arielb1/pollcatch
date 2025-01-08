@@ -68,6 +68,7 @@ pub fn write_timestamp_pthread_key(time: usize) {
     }
 }
 
+/// asprof function you'll need to install using `asprof_set_helper(pollcatch::asprof_helper_fn)`
 pub extern "C" fn asprof_helper_fn() -> u64 {
     let cur = read_timestamp_pthread_key();
     if cur == 0 {
@@ -103,6 +104,8 @@ impl<F: Future> Future for PollTimingFuture<F> {
     }
 }
 
+
+/// A tower layer that adds long poll detection
 pub struct PollTimingLayer;
 
 impl<S> tower_layer::Layer<S> for PollTimingLayer {
@@ -113,6 +116,7 @@ impl<S> tower_layer::Layer<S> for PollTimingLayer {
     }
 }
 
+/// A tower service that adds long poll detection
 pub struct PollTimingService<S> { inner: S }
 
 impl<S, Request> tower_service::Service<Request> for PollTimingService<S>
