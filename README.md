@@ -5,7 +5,8 @@ high tail latencies to other tasks running on the same executor, so it's useful 
 
 To use this, you need to attach async-profiler to your program. For it to work, you can't load it with LD_PRELOAD
 but must use the API calls and add a call to the `asprof_set_helper` (added in my branch) that enables the timestamp
-tracing.
+tracing. The information is currently published only in JFR mode, and you can use the decoder provided in this
+package to find the polls exceeding some threshold.
 
 To use, you currently need this branch of async-profiler:
 
