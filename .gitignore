@@ -1,3 +1,5 @@
 /target
 profile.jfr
 /decoder/target
+.attach*
+performance.pr

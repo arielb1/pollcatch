@@ -38,9 +38,8 @@ pub fn nas() {
 
 #[tokio::main]
 pub async fn main() -> Result<(), anyhow::Error> {
-    let cmd = c"start,jfr,timeout=3s,event=wall,cstack=dwarf,loglevel=debug,file=profile.jfr";
+    let cmd = c"start,jfr,timeout=3s,event=wall,signal=27,cstack=dwarf,loglevel=debug,file=profile.jfr";
     let err;
-    pollcatch::enable_poll_timing();
     let lib;
     let asprof_init: libloading::Symbol<unsafe extern "C" fn()>;
     let asprof_error_str: libloading::Symbol<unsafe extern "C" fn(err: asprof_error_t) -> *const std::ffi::c_char>;
@@ -48,18 +47,20 @@ pub async fn main() -> Result<(), anyhow::Error> {
         command: *const std::ffi::c_char,
         output_callback: asprof_writer_t,
     ) -> asprof_error_t>;
-    let asprof_set_helper: libloading::Symbol<unsafe extern "C" fn(helper: extern "C" fn() -> u64)>;
+    //let asprof_set_helper: libloading::Symbol<unsafe extern "C" fn(helper: extern "C" fn() -> u64)>;
     unsafe {
         lib = libloading::Library::new("libasyncProfiler.so")?;
         asprof_init = lib.get(b"asprof_init")?;
         asprof_error_str = lib.get(b"asprof_error_str")?;
         asprof_execute = lib.get(b"asprof_execute")?;
-        asprof_set_helper = lib.get(b"asprof_set_helper")?;
+        //asprof_set_helper = lib.get(b"asprof_set_helper")?;
 
         asprof_init();
-        asprof_set_helper(pollcatch::asprof_helper_fn);
+        //asprof_set_helper(pollcatch::asprof_helper_fn);
         err = asprof_execute(cmd.as_ptr().cast(), my_output_callback);    
     }
+    let lf = std::fs::OpenOptions::new().create(true).write(true).open("performance.pr")?;
+    pollcatch::enable_poll_timing(lf);
 
     if !err.is_null() {
         unsafe {
