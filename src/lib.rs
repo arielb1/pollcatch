@@ -71,10 +71,12 @@ pub fn enable_poll_timing(log_file: File) {
 
     if let Some(ch) = PERFORMANCE_WRITER.get() {
         ch.send(writer::Event::CalibrateTscToMonotonic {
-            shift: calibration.scale_shift,
-            mul: calibration.scale_factor,
-            src_epoch: calibration.src_time,
-            ref_epoch: calibration.ref_time
+            data: writer::CalibrationData {
+                shift: calibration.scale_shift,
+                mul: calibration.scale_factor,
+                src_epoch: calibration.src_time,
+                ref_epoch: calibration.ref_time
+            }
         }).ok();
     }
 
