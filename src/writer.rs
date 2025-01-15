@@ -38,7 +38,7 @@ fn write_event(w: &mut impl Write, e: Event) -> std::io::Result<()> {
     }
 }
 
-pub fn writer_fn(rx: std::sync::mpsc::Receiver<Event>, f: File) -> std::io::Result<()> {
+pub fn writer_fn(rx: std::sync::mpsc::Receiver<Event>, f: Box<dyn Write + Send>) -> std::io::Result<()> {
     let mut w = BufWriter::new(f);
     loop {
         match rx.recv() {
@@ -61,7 +61,7 @@ pub fn writer_fn(rx: std::sync::mpsc::Receiver<Event>, f: File) -> std::io::Resu
     }
 }
 
-pub(crate) fn start_writer(f: File) -> std::sync::mpsc::Sender<Event> {
+pub(crate) fn start_writer(f: Box<dyn Write + Send>) -> std::sync::mpsc::Sender<Event> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(|| {
         if let Err(e) = writer_fn(rx, f) {

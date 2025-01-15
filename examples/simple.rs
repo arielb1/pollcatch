@@ -60,7 +60,7 @@ pub async fn main() -> Result<(), anyhow::Error> {
         err = asprof_execute(cmd.as_ptr().cast(), my_output_callback);    
     }
     let lf = std::fs::OpenOptions::new().create(true).write(true).open("performance.pr")?;
-    pollcatch::enable_poll_timing(lf);
+    pollcatch::enable_poll_timing(Box::new(lf));
 
     if !err.is_null() {
         unsafe {

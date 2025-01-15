@@ -1,4 +1,4 @@
-use std::{fs::File, future::Future, mem::MaybeUninit, pin::Pin, sync::{atomic, LazyLock, OnceLock}};
+use std::{fs::File, future::Future, io::Write, mem::MaybeUninit, pin::Pin, sync::{atomic, LazyLock, OnceLock}};
 
 mod calibration;
 mod stats;
@@ -15,7 +15,7 @@ pin_project_lite::pin_project! {
 
 static PERFORMANCE_WRITER: OnceLock<std::sync::mpsc::Sender<writer::Event>> = OnceLock::new();
 
-pub fn start_performance_writer(f: File) {
+pub fn start_performance_writer(f: Box<dyn Write + Send>) {
     PERFORMANCE_WRITER.get_or_init(|| {
         writer::start_writer(f)
     });
@@ -63,7 +63,7 @@ extern "C" fn my_action(sig: libc::c_int, info: *mut libc::siginfo_t, ucontext: 
 /// Until this function is called, poll timing will not be measured.
 ///
 /// This function is fine if called multiple times.
-pub fn enable_poll_timing(log_file: File) {
+pub fn enable_poll_timing(log_file: Box<dyn Write + Send>) {
     start_performance_writer(log_file);
 
     let mut calibration = calibration::Calibration::default();
