@@ -1,4 +1,3 @@
-
 // copied from quanta crate
 
 /// Estimates the arithmetic mean (and the error) for a set of samples.

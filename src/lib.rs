@@ -1,4 +1,10 @@
-use std::{fs::File, future::Future, io::Write, mem::MaybeUninit, pin::Pin, sync::{atomic, LazyLock, OnceLock}};
+use std::{
+    future::Future,
+    io::Write,
+    mem::MaybeUninit,
+    pin::Pin,
+    sync::{atomic, LazyLock, Once, OnceLock},
+};
 
 mod calibration;
 mod stats;
@@ -16,11 +22,14 @@ pin_project_lite::pin_project! {
 static PERFORMANCE_WRITER: OnceLock<std::sync::mpsc::Sender<writer::Event>> = OnceLock::new();
 
 pub fn start_performance_writer(f: Box<dyn Write + Send>) {
-    PERFORMANCE_WRITER.get_or_init(|| {
-        writer::start_writer(f)
-    });
+    PERFORMANCE_WRITER.get_or_init(|| writer::start_writer(f));
 }
 
+static ENABLE_POLL_LOCK: Once = Once::new();
+
+// Technically this doesn't need to be a separate LazyLock due to the Once. However,
+// different implementations have this as something that is not an Once, so keeping
+// it a LazyLock.
 static TIMESTAMP_PTHREAD_KEY: LazyLock<libc::c_int> = LazyLock::new(|| unsafe {
     let mut key = !0;
     if libc::pthread_key_create(&mut key, None) < 0 {
@@ -32,8 +41,7 @@ static TIMESTAMP_PTHREAD_KEY: LazyLock<libc::c_int> = LazyLock::new(|| unsafe {
 
 static TIMESTAMP_PTHREAD_KEY_ASYNC_SIGNAL_SAFE: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(-1);
-static SIGACTION: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static SIGACTION: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn empty_sigset() -> libc::sigset_t {
     let mut result: MaybeUninit<libc::sigset_t> = MaybeUninit::zeroed();
@@ -58,43 +66,31 @@ extern "C" fn my_action(sig: libc::c_int, info: *mut libc::siginfo_t, ucontext: 
     }
 }
 
-/// Enables poll timing.
-///
-/// Until this function is called, poll timing will not be measured.
-///
-/// This function is fine if called multiple times.
-pub fn enable_poll_timing(log_file: Box<dyn Write + Send>) {
-    start_performance_writer(log_file);
+fn enable_poll_timing_pthread_key() {
+        // reading a #[thread_local] is not async signal safe, which is why we use a
+        // LazyLock (to synchronize writers of the pthread key), an AtomicI64
+        // to synchronize readers of the pthread key, and a pthread key to synchronize threads.
+        // force the pthread key
+        let pthread_key = *TIMESTAMP_PTHREAD_KEY as isize;
+        // and write it to the variable. Use an *atomic* write here to ensure that no thread
+        // will try to access the pthread-key before it is defined.
+        //
+        // If there are multiple stores, they will all write the same value and happen-after
+        // the pthread key initialization due to the LazyLock.
+        //
+        // This assumes that it's OK to use lock-free atomics from signals as per C11
+        TIMESTAMP_PTHREAD_KEY_ASYNC_SIGNAL_SAFE
+            .store(pthread_key, std::sync::atomic::Ordering::Release);
+}
 
-    let mut calibration = calibration::Calibration::default();
-    calibration.calibrate(&nanotime, &tsc::now);
-
-    if let Some(ch) = PERFORMANCE_WRITER.get() {
-        ch.send(writer::Event::CalibrateTscToMonotonic {
-            data: writer::CalibrationData {
-                shift: calibration.scale_shift,
-                mul: calibration.scale_factor,
-                src_epoch: calibration.src_time,
-                ref_epoch: calibration.ref_time
-            }
-        }).ok();
-    }
-
-    // reading a #[thread_local] is not async signal safe, which is why we use a
-    // LazyLock (to synchronize writers of the pthread key), an AtomicI64
-    // to synchronize readers of the pthread key, and a pthread key to synchronize threads.
-    // force the pthread key
-    let pthread_key = *TIMESTAMP_PTHREAD_KEY as isize;
-    // and write it to the variable. Use an *atomic* write here to ensure that no thread
-    // will try to access the pthread-key before it is defined.
-    //
-    // If there are multiple stores, they will all write the same value and happen-after
-    // the pthread key initialization due to the LazyLock.
-    //
-    // This assumes that it's OK to use lock-free atomics from signals as per C11
-    TIMESTAMP_PTHREAD_KEY_ASYNC_SIGNAL_SAFE
-        .store(pthread_key, std::sync::atomic::Ordering::Release);
+fn enable_poll_timing_signal_handler(signum: libc::c_int) {
+    // safety: my_action is safe to call
     unsafe {
+        // Null out the signal action to ensure nothing unintended happens.
+        // (Relaxed is the right ordering here since the interesting happens-before
+        // is sigaction / signal handler. store-acquire is not a thing).
+        SIGACTION.store(0, atomic::Ordering::Relaxed);
+
         let act: libc::sigaction = libc::sigaction {
             sa_sigaction: my_action as usize,
             sa_mask: empty_sigset(),
@@ -107,11 +103,44 @@ pub fn enable_poll_timing(log_file: Box<dyn Write + Send>) {
             sa_flags: 0,
             sa_restorer: None,
         };
-        if libc::sigaction(libc::SIGPROF, &act, &mut oldact) != 0 {
+        if libc::sigaction(signum, &act, &mut oldact) != 0 {
             panic!("sigaction {:?}", std::io::Error::last_os_error());
         }
+        // if a signal handler gets the new signal handler, 
         SIGACTION.store(oldact.sa_sigaction, atomic::Ordering::Release);
     }
+}
+
+fn calibrate_clock_and_send_to_performance_writer() {
+    let mut calibration: calibration::Calibration = calibration::Calibration::default();
+    calibration.calibrate(&nanotime, &tsc::now);
+
+    if let Some(ch) = PERFORMANCE_WRITER.get() {
+        ch.send(writer::Event::CalibrateTscToMonotonic {
+            data: writer::CalibrationData {
+                shift: calibration.scale_shift,
+                mul: calibration.scale_factor,
+                src_epoch: calibration.src_time,
+                ref_epoch: calibration.ref_time,
+            },
+        })
+        .ok();
+    }
+
+}
+
+/// Enables poll timing.
+///
+/// Until this function is called, poll timing will not be measured.
+///
+/// This function is fine if called multiple times.
+pub fn enable_poll_timing(log_file: Box<dyn Write + Send>) {
+    ENABLE_POLL_LOCK.call_once(|| {
+        start_performance_writer(log_file);
+        calibrate_clock_and_send_to_performance_writer();
+        enable_poll_timing_pthread_key();
+        enable_poll_timing_signal_handler(libc::SIGPROF);
+    });
 }
 
 /// async-signal safe. returns 0 if key is not initialized
@@ -152,7 +181,9 @@ fn nanotime() -> u64 {
             0
         } else {
             let ts = ts.assume_init();
-            (ts.tv_sec as u64).wrapping_mul(1_000_000_000).wrapping_add(ts.tv_nsec as u64)
+            (ts.tv_sec as u64)
+                .wrapping_mul(1_000_000_000)
+                .wrapping_add(ts.tv_nsec as u64)
         }
     }
 }
@@ -165,7 +196,13 @@ fn write_timestamp(before: u64) {
 
         let clock_end = nanotime();
         let end = tsc::now();
-        ch.send(writer::Event::Poll { start: before, end, clock_end, tid }).ok();
+        ch.send(writer::Event::Poll {
+            start: before,
+            end,
+            clock_end,
+            tid,
+        })
+        .ok();
     }
 }
 
@@ -191,7 +228,6 @@ impl<F: Future> Future for PollTimingFuture<F> {
     }
 }
 
-
 /// A tower layer that adds long poll detection
 pub struct PollTimingLayer;
 
@@ -204,16 +240,22 @@ impl<S> tower_layer::Layer<S> for PollTimingLayer {
 }
 
 /// A tower service that adds long poll detection
-pub struct PollTimingService<S> { inner: S }
+pub struct PollTimingService<S> {
+    inner: S,
+}
 
 impl<S, Request> tower_service::Service<Request> for PollTimingService<S>
-    where S: tower_service::Service<Request>
+where
+    S: tower_service::Service<Request>,
 {
     type Response = S::Response;
     type Error = S::Error;
     type Future = PollTimingFuture<S::Future>;
 
-    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
         // not timestamping here - leave that to the top-level future
         self.inner.poll_ready(cx)
     }

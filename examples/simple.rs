@@ -38,15 +38,20 @@ pub fn nas() {
 
 #[tokio::main]
 pub async fn main() -> Result<(), anyhow::Error> {
-    let cmd = c"start,jfr,timeout=3s,event=wall,signal=27,cstack=dwarf,loglevel=debug,file=profile.jfr";
+    let cmd =
+        c"start,jfr,timeout=3s,event=wall,signal=27,cstack=dwarf,loglevel=debug,file=profile.jfr";
     let err;
     let lib;
     let asprof_init: libloading::Symbol<unsafe extern "C" fn()>;
-    let asprof_error_str: libloading::Symbol<unsafe extern "C" fn(err: asprof_error_t) -> *const std::ffi::c_char>;
-    let asprof_execute: libloading::Symbol<unsafe extern "C" fn(
-        command: *const std::ffi::c_char,
-        output_callback: asprof_writer_t,
-    ) -> asprof_error_t>;
+    let asprof_error_str: libloading::Symbol<
+        unsafe extern "C" fn(err: asprof_error_t) -> *const std::ffi::c_char,
+    >;
+    let asprof_execute: libloading::Symbol<
+        unsafe extern "C" fn(
+            command: *const std::ffi::c_char,
+            output_callback: asprof_writer_t,
+        ) -> asprof_error_t,
+    >;
     //let asprof_set_helper: libloading::Symbol<unsafe extern "C" fn(helper: extern "C" fn() -> u64)>;
     unsafe {
         lib = libloading::Library::new("libasyncProfiler.so")?;
@@ -57,9 +62,12 @@ pub async fn main() -> Result<(), anyhow::Error> {
 
         asprof_init();
         //asprof_set_helper(pollcatch::asprof_helper_fn);
-        err = asprof_execute(cmd.as_ptr().cast(), my_output_callback);    
+        err = asprof_execute(cmd.as_ptr().cast(), my_output_callback);
     }
-    let lf = std::fs::OpenOptions::new().create(true).write(true).open("performance.pr")?;
+    let lf = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open("performance.pr")?;
     pollcatch::enable_poll_timing(Box::new(lf));
 
     if !err.is_null() {
@@ -75,16 +83,19 @@ pub async fn main() -> Result<(), anyhow::Error> {
     let mut ts = vec![];
 
     for _ in 0..16 {
-        ts.push(tokio::task::spawn(pollcatch::PollTimingFuture::new(async move {
-            for i in 0..20_000u64 { // 100 us * 20_000 = 2s
-                tokio::task::yield_now().await;
-                if i % 1000 == 0 {
-                    as_();
-                } else {
-                    nas();
+        ts.push(tokio::task::spawn(pollcatch::PollTimingFuture::new(
+            async move {
+                for i in 0..20_000u64 {
+                    // 100 us * 20_000 = 2s
+                    tokio::task::yield_now().await;
+                    if i % 1000 == 0 {
+                        as_();
+                    } else {
+                        nas();
+                    }
                 }
-            }
-        })));
+            },
+        )));
     }
     for t in ts {
         t.await.ok();
