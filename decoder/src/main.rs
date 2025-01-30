@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use jfrs::reader::{
     event::Accessor,
     value_descriptor::{Primitive, ValueDescriptor},
-    JfrReader,
+    Chunk, JfrReader,
 };
 use pr_parser::PossiblyUnknownEvent;
 use std::io::{Read, Seek};
@@ -188,6 +188,68 @@ fn resolve_stack_trace(trace: Accessor<'_>) -> Vec<StackFrame> {
     res
 }
 
+fn find_delta_t_from_clock(pr_map: &Vec<PollEventKey>, tid: i64, clock_start: i64) -> Option<u64> {
+    if let (Ok(tid), Ok(clock_start)) = (tid.try_into(), clock_start.try_into()) {
+        let partition_point = pr_map
+            .partition_point(|x| x.tid < tid || (tid == x.tid && x.clock_start <= clock_start));
+        if let Some(index) = partition_point.checked_sub(1) {
+            let bound = pr_map[index];
+            let inside = tid == bound.tid
+                && bound.clock_start < clock_start
+                && clock_start - bound.clock_start < bound.duration;
+            if inside {
+                return Some(clock_start - bound.clock_start);
+            }
+        }
+        None
+    } else {
+        None
+    }
+}
+
+fn process_sample(
+    chunk: &Chunk,
+    pr_map: &Vec<PollEventKey>,
+    sampled_thread: Option<&ValueDescriptor>,
+    stacktrace: Option<&ValueDescriptor>,
+    appword: Option<i64>,
+    start_time_ticks: i64,
+    os_thread_index: usize,
+    long_poll_duration: u128,
+) -> Option<Sample> {
+    let mut delta_t = 0;
+    let mut thread_id = !0;
+    if let Some(ValueDescriptor::Object(st)) = sampled_thread {
+        if let Some(&ValueDescriptor::Primitive(Primitive::Long(tid))) =
+            st.fields.get(os_thread_index)
+        {
+            thread_id = tid as i64;
+        }
+    }
+    if let Some(appword) = appword {
+        delta_t = appword as u64;
+    }
+    if delta_t == 0 {
+        if let Some(delta_t_) = find_delta_t_from_clock(pr_map, thread_id, start_time_ticks) {
+            delta_t = delta_t_;
+        }
+    }
+
+    let delta_t_micros = (delta_t as u128) * 1000000 / (chunk.header.ticks_per_second as u128);
+    if delta_t_micros < long_poll_duration {
+        return None;
+    }
+    stacktrace.map(|trace| Sample {
+        thread_id,
+        start_time: Duration::from_nanos(
+            ((start_time_ticks as u128) * 1_000_000_000 / (chunk.header.ticks_per_second as u128))
+                as u64,
+        ),
+        delta_t: Duration::from_micros(delta_t_micros as u64),
+        frames: resolve_stack_trace(Accessor::new(chunk, trace)),
+    })
+}
+
 fn jfr_samples<T>(
     reader: &mut T,
     long_poll_duration: Duration,
@@ -203,20 +265,35 @@ where
     for chunk in jfr_reader.chunks() {
         let (mut c_rdr, c) = chunk?;
         let mut wall_clock_sample = None;
-        let mut start_time_index = !0;
+        let mut execution_sample = None;
+        let mut wcs_start_time_index = !0;
+        let mut exs_start_time_index = !0;
         let mut appword_index = !0;
-        let mut stacktrace_index = !0;
-        let mut sampled_thread_index = !0;
+        let mut wcs_stacktrace_index = !0;
+        let mut exs_stacktrace_index = !0;
+        let mut wcs_sampled_thread_index = !0;
+        let mut exs_sampled_thread_index = !0;
         let mut os_thread_index = !0;
         for ty in c.metadata.type_pool.get_types() {
             if ty.name() == "profiler.WallClockSample" {
                 wall_clock_sample = Some(ty.class_id);
                 for (i, field) in ty.fields.iter().enumerate() {
                     match field.name() {
-                        "startTime" => start_time_index = i,
+                        "startTime" => wcs_start_time_index = i,
                         "appword" => appword_index = i,
-                        "stackTrace" => stacktrace_index = i,
-                        "sampledThread" => sampled_thread_index = i,
+                        "stackTrace" => wcs_stacktrace_index = i,
+                        "sampledThread" => wcs_sampled_thread_index = i,
+                        _ => {}
+                    }
+                }
+            }
+            if ty.name() == "jdk.ExecutionSample" {
+                execution_sample = Some(ty.class_id);
+                for (i, field) in ty.fields.iter().enumerate() {
+                    match field.name() {
+                        "startTime" => exs_start_time_index = i,
+                        "stackTrace" => exs_stacktrace_index = i,
+                        "sampledThread" => exs_sampled_thread_index = i,
                         _ => {}
                     }
                 }
@@ -236,67 +313,69 @@ where
                 if let ValueDescriptor::Object(o) = event.value().value {
                     let start_time_ticks =
                         if let Some(&ValueDescriptor::Primitive(Primitive::Long(start_time))) =
-                            o.fields.get(start_time_index)
+                            o.fields.get(wcs_start_time_index)
                         {
                             start_time
                         } else {
                             0
                         };
-                    let start_time_duration = Duration::from_nanos(
-                        ((start_time_ticks as u128) * 1_000_000_000
-                            / (c.header.ticks_per_second as u128)) as u64,
-                    );
-
-                    let mut delta_t = 0;
-                    let mut thread_id = !0;
-                    if let Some(ValueDescriptor::Object(st)) = o
+                    let sampled_thread = o
                         .fields
-                        .get(sampled_thread_index)
+                        .get(wcs_sampled_thread_index)
                         .and_then(|st| Accessor::new(&c, st).resolve())
-                        .map(|a| a.value)
-                    {
-                        if let Some(&ValueDescriptor::Primitive(Primitive::Long(tid))) =
-                            st.fields.get(os_thread_index)
-                        {
-                            thread_id = tid as i64;
-                        }
-                    }
-                    if appword_index != !0 {
-                        if let Some(&ValueDescriptor::Primitive(Primitive::Long(appword))) =
-                            o.fields.get(appword_index)
-                        {
-                            delta_t = appword as u64;
-                        }
-                    }
-                    if delta_t == 0 {
-                        if let (Ok(tid), Ok(clock_start)) =
-                            (thread_id.try_into(), start_time_ticks.try_into())
-                        {
-                            let partition_point = pr_map.partition_point(|x| x.tid < tid || (tid == x.tid && x.clock_start <= clock_start));
-                            if let Some(index) = partition_point.checked_sub(1) {
-                                let bound = pr_map[index];
-                                let inside = tid == bound.tid
-                                    && bound.clock_start < clock_start
-                                    && clock_start - bound.clock_start < bound.duration;
-                                if inside {
-                                    delta_t = clock_start - bound.clock_start;
-                                }
+                        .map(|a| a.value);
+                    let appword = if appword_index == !0 {
+                        None
+                    } else {
+                        match o.fields.get(appword_index) {
+                            Some(&ValueDescriptor::Primitive(Primitive::Long(appword))) => {
+                                Some(appword)
                             }
+                            _ => None,
                         }
+                    };
+                    let stacktrace = o.fields.get(wcs_stacktrace_index);
+                    if let Some(sample) = process_sample(
+                        &c,
+                        pr_map,
+                        sampled_thread,
+                        stacktrace,
+                        appword,
+                        start_time_ticks,
+                        os_thread_index,
+                        long_poll_duration,
+                    ) {
+                        samples.push(sample);
                     }
-
-                    let delta_t_micros =
-                        (delta_t as u128) * 1000000 / (c.header.ticks_per_second as u128);
-                    if delta_t_micros < long_poll_duration {
-                        continue;
-                    }
-                    if let Some(trace) = o.fields.get(stacktrace_index) {
-                        samples.push(Sample {
-                            thread_id,
-                            start_time: start_time_duration,
-                            delta_t: Duration::from_micros(delta_t_micros as u64),
-                            frames: resolve_stack_trace(Accessor::new(&c, trace)),
-                        })
+                }
+            }
+            if Some(event.class.class_id) == execution_sample {
+                if let ValueDescriptor::Object(o) = event.value().value {
+                    let start_time_ticks =
+                        if let Some(&ValueDescriptor::Primitive(Primitive::Long(start_time))) =
+                            o.fields.get(exs_start_time_index)
+                        {
+                            start_time
+                        } else {
+                            0
+                        };
+                    let sampled_thread = o
+                        .fields
+                        .get(exs_sampled_thread_index)
+                        .and_then(|st| Accessor::new(&c, st).resolve())
+                        .map(|a| a.value);
+                    let stacktrace = o.fields.get(exs_stacktrace_index);
+                    if let Some(sample) = process_sample(
+                        &c,
+                        pr_map,
+                        sampled_thread,
+                        stacktrace,
+                        None, /* appword */
+                        start_time_ticks,
+                        os_thread_index,
+                        long_poll_duration,
+                    ) {
+                        samples.push(sample);
                     }
                 }
             }
