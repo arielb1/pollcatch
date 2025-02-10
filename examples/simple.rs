@@ -39,7 +39,7 @@ pub fn nas() {
 #[tokio::main]
 pub async fn main() -> Result<(), anyhow::Error> {
     let cmd =
-        c"start,jfr,timeout=3s,event=wall,signal=27,cstack=dwarf,loglevel=debug,file=profile.jfr";
+        c"start,jfr,clock=tsc,timeout=3s,event=wall,signal=27,cstack=dwarf,loglevel=debug,file=profile.jfr";
     let err;
     let lib;
     let asprof_init: libloading::Symbol<unsafe extern "C" fn()>;

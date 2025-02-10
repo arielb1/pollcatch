@@ -13,7 +13,7 @@ mod writer;
 
 pin_project_lite::pin_project! {
     /// A future that times the time since the last poll
-    pub struct PollTimingFuture<F: Future> {
+    pub struct PollTimingFuture<F> {
         #[pin]
         inner: F
     }
@@ -167,7 +167,7 @@ pub fn write_timestamp_pthread_key(time: usize) {
     }
 }
 
-impl<F: Future> PollTimingFuture<F> {
+impl<F> PollTimingFuture<F> {
     /// Wrap a future into a PollTimingFuture
     pub fn new(inner: F) -> Self {
         PollTimingFuture { inner }
