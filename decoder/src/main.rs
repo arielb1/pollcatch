@@ -44,7 +44,14 @@ struct PollEventKey {
     duration: u64,
 }
 
-fn make_pr_map<R: Read + Seek>(pr_reader: &mut R) -> anyhow::Result<Vec<PollEventKey>> {
+#[derive(PartialEq, Eq, Copy, Clone)]
+enum ClockSource {
+    Tsc,
+    Monotonic,
+}
+
+
+fn make_pr_map<R: Read + Seek>(pr_reader: &mut R, clock_source: ClockSource) -> anyhow::Result<Vec<PollEventKey>> {
     let mut pr_map = Vec::new();
     let mut calibration = None;
     while let Some(record) = pr_parser::read_event(pr_reader)? {
@@ -59,13 +66,21 @@ fn make_pr_map<R: Read + Seek>(pr_reader: &mut R) -> anyhow::Result<Vec<PollEven
                 clock_end,
                 tid,
             }) => {
-                let Some(calibration) = &calibration else {
-                    tracing::warn!("got poll event but no calibration");
-                    continue;
+                let (clock_start, duration) = match clock_source {
+                    ClockSource::Tsc => {
+                        (start, end.saturating_sub(start))
+                    }
+                    ClockSource::Monotonic => {
+                        let Some(calibration) = &calibration else {
+                            tracing::warn!("got poll event but no calibration");
+                            continue;
+                        };
+                        let poll_duration = end.saturating_sub(start);
+                        let duration = calibration.scale_src_duration_to_ref(poll_duration);
+                        let clock_start = clock_end.saturating_sub(duration);
+                        (clock_start, duration)
+                    }
                 };
-                let poll_duration = end.saturating_sub(start);
-                let duration = calibration.scale_src_duration_to_ref(poll_duration);
-                let clock_start = clock_end.saturating_sub(duration);
                 pr_map.push(PollEventKey {
                     tid,
                     clock_start,
@@ -88,14 +103,17 @@ fn main() -> anyhow::Result<()> {
             min_length,
             stack_depth,
         } => {
-            let pr_map = if let Some(pr_file) = pr_file {
+            let (tsc_pr_map, monotonic_pr_map) = if let Some(pr_file) = pr_file {
+                let mut pr_reader = BufReader::new(std::fs::File::open(pr_file.clone())?);
+                let tsc_pr_map = make_pr_map(&mut pr_reader, ClockSource::Tsc)?;
                 let mut pr_reader = BufReader::new(std::fs::File::open(pr_file)?);
-                make_pr_map(&mut pr_reader)?
+                let monotonic_pr_map = make_pr_map(&mut pr_reader, ClockSource::Monotonic)?;
+                (tsc_pr_map, monotonic_pr_map)
             } else {
-                Vec::new()
+                (Vec::new(), Vec::new())
             };
             let mut reader = BufReader::new(std::fs::File::open(jfr_file)?);
-            print_samples(jfr_samples(&mut reader, min_length, &pr_map)?, stack_depth);
+            print_samples(jfr_samples(&mut reader, min_length, &tsc_pr_map, &monotonic_pr_map)?, stack_depth);
             Ok(())
         }
     }
@@ -253,7 +271,8 @@ fn process_sample(
 fn jfr_samples<T>(
     reader: &mut T,
     long_poll_duration: Duration,
-    pr_map: &Vec<PollEventKey>,
+    tsc_pr_map: &Vec<PollEventKey>,
+    monotonic_pr_map: &Vec<PollEventKey>,
 ) -> anyhow::Result<Vec<Sample>>
 where
     T: Read + Seek,
@@ -273,7 +292,10 @@ where
         let mut exs_stacktrace_index = !0;
         let mut wcs_sampled_thread_index = !0;
         let mut exs_sampled_thread_index = !0;
+        let mut active_setting_name_index = !0;
+        let mut active_setting_value_index = !0;
         let mut os_thread_index = !0;
+        let mut active_setting = None;
         for ty in c.metadata.type_pool.get_types() {
             if ty.name() == "profiler.WallClockSample" {
                 wall_clock_sample = Some(ty.class_id);
@@ -306,9 +328,45 @@ where
                     }
                 }
             }
+            if ty.name() == "jdk.ActiveSetting" {
+                active_setting = Some(ty.class_id);
+                for (i, field) in ty.fields.iter().enumerate() {
+                    match field.name() {
+                        "name" => active_setting_name_index = i,
+                        "value" => active_setting_value_index = i,
+                        _ => {}
+                    }
+                }
+            }
         }
+        let mut pr_map = monotonic_pr_map;
         for event in c_rdr.events(&c) {
             let event = event?;
+            if Some(event.class.class_id) == active_setting {
+                if let ValueDescriptor::Object(o) = event.value().value {
+                    let name = o
+                        .fields
+                        .get(active_setting_name_index)
+                        .and_then(|st| Accessor::new(&c, st).resolve())
+                        .map(|a| a.value);
+                    let value = o
+                        .fields
+                        .get(active_setting_value_index)
+                        .and_then(|st| Accessor::new(&c, st).resolve())
+                        .map(|a| a.value);
+                    match (name, value) {
+                        (Some(ValueDescriptor::Primitive(Primitive::String(name))),
+                        Some(ValueDescriptor::Primitive(Primitive::String(value)))) if name == "clock" => {
+                            if value == "tsc" {
+                                pr_map = tsc_pr_map;
+                            } else {
+                                pr_map = monotonic_pr_map;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             if Some(event.class.class_id) == wall_clock_sample {
                 if let ValueDescriptor::Object(o) = event.value().value {
                     let start_time_ticks =
