@@ -67,20 +67,20 @@ extern "C" fn my_action(sig: libc::c_int, info: *mut libc::siginfo_t, ucontext: 
 }
 
 fn enable_poll_timing_pthread_key() {
-        // reading a #[thread_local] is not async signal safe, which is why we use a
-        // LazyLock (to synchronize writers of the pthread key), an AtomicI64
-        // to synchronize readers of the pthread key, and a pthread key to synchronize threads.
-        // force the pthread key
-        let pthread_key = *TIMESTAMP_PTHREAD_KEY as isize;
-        // and write it to the variable. Use an *atomic* write here to ensure that no thread
-        // will try to access the pthread-key before it is defined.
-        //
-        // If there are multiple stores, they will all write the same value and happen-after
-        // the pthread key initialization due to the LazyLock.
-        //
-        // This assumes that it's OK to use lock-free atomics from signals as per C11
-        TIMESTAMP_PTHREAD_KEY_ASYNC_SIGNAL_SAFE
-            .store(pthread_key, std::sync::atomic::Ordering::Release);
+    // reading a #[thread_local] is not async signal safe, which is why we use a
+    // LazyLock (to synchronize writers of the pthread key), an AtomicI64
+    // to synchronize readers of the pthread key, and a pthread key to synchronize threads.
+    // force the pthread key
+    let pthread_key = *TIMESTAMP_PTHREAD_KEY as isize;
+    // and write it to the variable. Use an *atomic* write here to ensure that no thread
+    // will try to access the pthread-key before it is defined.
+    //
+    // If there are multiple stores, they will all write the same value and happen-after
+    // the pthread key initialization due to the LazyLock.
+    //
+    // This assumes that it's OK to use lock-free atomics from signals as per C11
+    TIMESTAMP_PTHREAD_KEY_ASYNC_SIGNAL_SAFE
+        .store(pthread_key, std::sync::atomic::Ordering::Release);
 }
 
 fn enable_poll_timing_signal_handler(signum: libc::c_int) {
@@ -106,7 +106,7 @@ fn enable_poll_timing_signal_handler(signum: libc::c_int) {
         if libc::sigaction(signum, &act, &mut oldact) != 0 {
             panic!("sigaction {:?}", std::io::Error::last_os_error());
         }
-        // if a signal handler gets the new signal handler, 
+        // if a signal handler gets the new signal handler,
         SIGACTION.store(oldact.sa_sigaction, atomic::Ordering::Release);
     }
 }
@@ -126,7 +126,6 @@ fn calibrate_clock_and_send_to_performance_writer() {
         })
         .ok();
     }
-
 }
 
 /// Enables poll timing.
